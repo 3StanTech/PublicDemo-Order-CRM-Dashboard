@@ -294,6 +294,8 @@ export class FirestoreAdapter implements StorageAdapter {
 
   private readonly pending = new Map<string, PendingWrite>()
   private readonly laneFreeAt = new Map<string, number>()
+  /** Delta docs whose latest snapshot still carries this tab's unacknowledged writes. */
+  private readonly unconfirmed = new Set<string>()
   private writeVersion = 0
   private draining = false
   private drainTimer: ReturnType<typeof setTimeout> | undefined
@@ -404,10 +406,9 @@ export class FirestoreAdapter implements StorageAdapter {
    * are removed by the function when their orders are deleted.
    */
   async clearVisitorData(): Promise<void> {
-    // Let startup replay the previous load's unsent writes first, so they are
-    // dropped below instead of being replayed (and re-sent) after the reset.
-    await this.readyPromise.catch(() => undefined)
+    // Lock first: startup replay and late edits are refused until the reset ends.
     this.resetting = true
+    await this.readyPromise.catch(() => undefined)
     for (const draft of this.itemDrafts.values()) clearTimeout(draft.timer)
     this.itemDrafts.clear()
     // Kept aside so a failed reset leaves the visitor's unsent edits queued.
@@ -432,6 +433,8 @@ export class FirestoreAdapter implements StorageAdapter {
       cleared = true
       // Anything queued meanwhile targeted the deleted data: nothing is re-sent.
       this.pending.clear()
+      for (const draft of this.itemDrafts.values()) clearTimeout(draft.timer)
+      this.itemDrafts.clear()
       writeStoredPending(uid, [])
     } finally {
       this.resetting = false
@@ -558,7 +561,7 @@ export class FirestoreAdapter implements StorageAdapter {
   /** True when the server already holds this write (acknowledged before its mirror entry was removed). */
   private serverHas(stored: StoredPendingWrite): boolean {
     const onServer = this.server[stored.coll].get(stored.key)
-    if (!onServer) return false
+    if (!onServer || this.unconfirmed.has(`${stored.coll}/${stored.key}`)) return false
     if (onServer.deleted || stored.delta.deleted) return onServer.deleted && stored.delta.deleted
     const record = stored.coll === 'orders'
       ? { ...(stored.delta.record as StoredOrder), items: sortItems((stored.delta.record as StoredOrder).items) }
@@ -592,16 +595,24 @@ export class FirestoreAdapter implements StorageAdapter {
       if (change.type === 'removed') {
         this.server[coll].delete(id)
         this.knownDocs.delete(`${coll}/${id}`)
+        this.unconfirmed.delete(`${coll}/${id}`)
         if (coll === 'orders') this.orderMeta.delete(id)
       } else {
         const data = change.doc.data({ serverTimestamps: 'estimate' })
         const delta = fromDocument(coll, data)
         this.knownDocs.add(`${coll}/${id}`)
-        // The rules' per-document write gap counts from the server's last write.
-        const updatedAt = millis(data.updatedAt)
+        const docKey = `${coll}/${id}`
+        const local = change.doc.metadata.hasPendingWrites
+        if (local) this.unconfirmed.add(docKey)
+        else this.unconfirmed.delete(docKey)
+        // The rules' per-document write gap counts from the server's last write. Only a
+        // confirmed timestamp counts (a pending one is a local estimate), and the wait is
+        // capped at one gap from now so clock skew cannot stretch it.
+        const updatedAt = local ? null : millis(data.updatedAt)
         if (updatedAt !== null) {
-          const docKey = `${coll}/${id}`
-          this.laneFreeAt.set(docKey, Math.max(this.laneFreeAt.get(docKey) ?? 0, updatedAt + DOC_WRITE_GAP_MS))
+          const now = Date.now()
+          const serverFree = Math.min(updatedAt + DOC_WRITE_GAP_MS, now + DOC_WRITE_GAP_MS)
+          this.laneFreeAt.set(docKey, Math.max(this.laneFreeAt.get(docKey) ?? 0, serverFree))
         }
         if (delta) (this.server[coll] as Map<string, typeof delta>).set(id, delta)
         if (coll === 'orders') this.orderMeta.set(id, { updatedAt: millis(data.updatedAt), pendingWrite: change.doc.metadata.hasPendingWrites })
@@ -671,6 +682,8 @@ export class FirestoreAdapter implements StorageAdapter {
 
   /** Records a delta optimistically and schedules its flush. */
   private stage<C extends DeltaCollection>(coll: C, key: string, delta: Delta<DeltaRecord[C]>): void {
+    // An edit that passed beforeWrite before a reset started must not land during it.
+    if (this.resetting) throw new Error('Your demo data is being reset.')
     const docKey = `${coll}/${key}`
     if (!delta.deleted && coll === 'orders') validateOrder(delta.record as StoredOrder)
     this.assertCapacity(docKey)
@@ -697,6 +710,7 @@ export class FirestoreAdapter implements StorageAdapter {
    * reverts to its last queued state) and nothing is queued.
    */
   private editItems(order: StoredOrder, items: StoredOrderItem[]): void {
+    if (this.resetting) throw new Error('Your demo data is being reset.')
     const record: StoredOrder = { ...order, items: sortItems(items) }
     try {
       validateOrder(record)

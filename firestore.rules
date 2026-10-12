@@ -1,0 +1,142 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function owner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    function docId(id) {
+      return id.matches('^[A-Za-z0-9-]{1,64}$');
+    }
+
+    function settingKey(key) {
+      return key.matches('^[a-z0-9_.-]{1,64}$');
+    }
+
+    function currentWrite() {
+      return request.resource.data.updatedAt is timestamp
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    function spacedWrite() {
+      return currentWrite()
+        && request.time >= resource.data.updatedAt + duration.value(1, 's');
+    }
+
+    // A create of any delta document must, in the same batch, raise the
+    // visitor profile counter by exactly one, keep it within the cap, and
+    // record which document it counts in `last`. The profile holds one `last`,
+    // so two creates in one batch cannot both be bound to a single +1.
+    function countedCreate(uid, coll, id) {
+      let profile = /databases/$(database)/documents/demos/$(uid);
+      let before = exists(profile) ? get(profile).data.docs : 0;
+      let after = getAfter(profile).data;
+      return after.docs is int && after.docs == before + 1 && after.docs <= 300
+        && after.last is string && after.last == coll + '/' + id;
+    }
+
+    function profile() {
+      let data = request.resource.data;
+      return data.keys().hasOnly(['createdAt', 'updatedAt', 'docs', 'last'])
+        && data.keys().hasAll(['createdAt', 'updatedAt', 'docs', 'last'])
+        && data.createdAt is timestamp
+        && data.docs is int && data.docs >= 0 && data.docs <= 300
+        && data.last is string && data.last.size() <= 100;
+    }
+
+    // Live documents carry every payload key; a tombstone (deleted seed record)
+    // carries none of them.
+    function tombstone() {
+      let data = request.resource.data;
+      return data.keys().hasOnly(['deleted', 'updatedAt'])
+        && data.keys().hasAll(['deleted', 'updatedAt'])
+        && data.deleted == true;
+    }
+
+    // Rules cannot loop, so check every index an items list may have.
+    function itemMaps(items) {
+      return (items.size() <= 0 || items[0] is map) && (items.size() <= 1 || items[1] is map)
+        && (items.size() <= 2 || items[2] is map) && (items.size() <= 3 || items[3] is map)
+        && (items.size() <= 4 || items[4] is map) && (items.size() <= 5 || items[5] is map)
+        && (items.size() <= 6 || items[6] is map) && (items.size() <= 7 || items[7] is map)
+        && (items.size() <= 8 || items[8] is map) && (items.size() <= 9 || items[9] is map)
+        && (items.size() <= 10 || items[10] is map) && (items.size() <= 11 || items[11] is map)
+        && (items.size() <= 12 || items[12] is map) && (items.size() <= 13 || items[13] is map)
+        && (items.size() <= 14 || items[14] is map) && (items.size() <= 15 || items[15] is map)
+        && (items.size() <= 16 || items[16] is map) && (items.size() <= 17 || items[17] is map)
+        && (items.size() <= 18 || items[18] is map) && (items.size() <= 19 || items[19] is map);
+    }
+
+    function orderDoc() {
+      let data = request.resource.data;
+      return tombstone()
+        || (data.keys().hasOnly(['deleted', 'order', 'items', 'clientTotalCentavos', 'updatedAt'])
+          && data.keys().hasAll(['deleted', 'order', 'items', 'clientTotalCentavos', 'updatedAt'])
+          && data.deleted == false
+          && data.order is map && data.order.size() <= 40
+          && data.items is list && data.items.size() <= 20 && itemMaps(data.items)
+          && data.clientTotalCentavos is int && data.clientTotalCentavos >= 0);
+    }
+
+    function customerDoc() {
+      let data = request.resource.data;
+      return tombstone()
+        || (data.keys().hasOnly(['deleted', 'customer', 'updatedAt'])
+          && data.keys().hasAll(['deleted', 'customer', 'updatedAt'])
+          && data.deleted == false
+          && data.customer is map && data.customer.size() <= 20);
+    }
+
+    function settingDoc() {
+      let data = request.resource.data;
+      return tombstone()
+        || (data.keys().hasOnly(['deleted', 'setting', 'updatedAt'])
+          && data.keys().hasAll(['deleted', 'setting', 'updatedAt'])
+          && data.deleted == false
+          && data.setting is map && data.setting.size() <= 10);
+    }
+
+    match /demos/{uid} {
+      // No client delete: deleting and recreating would reset the counter.
+      allow read: if owner(uid);
+      allow create: if owner(uid) && profile() && currentWrite()
+        && request.resource.data.createdAt == request.time;
+      // The counter only grows. Updates are not spaced: each delta-document
+      // create bumps it, and the cap of 300 already bounds creates.
+      allow update: if owner(uid) && profile() && currentWrite()
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.docs >= resource.data.docs;
+
+      match /orders/{id} {
+        allow read, delete: if owner(uid);
+        allow create: if owner(uid) && docId(id) && orderDoc() && currentWrite()
+          && countedCreate(uid, 'orders', id);
+        allow update: if owner(uid) && docId(id) && orderDoc() && spacedWrite();
+      }
+
+      match /customers/{id} {
+        allow read, delete: if owner(uid);
+        allow create: if owner(uid) && docId(id) && customerDoc() && currentWrite()
+          && countedCreate(uid, 'customers', id);
+        allow update: if owner(uid) && docId(id) && customerDoc() && spacedWrite();
+      }
+
+      match /settings/{key} {
+        allow read, delete: if owner(uid);
+        allow create: if owner(uid) && settingKey(key) && settingDoc() && currentWrite()
+          && countedCreate(uid, 'settings', key);
+        allow update: if owner(uid) && settingKey(key) && settingDoc() && spacedWrite();
+      }
+
+      // Written only by the verification function (Admin SDK bypasses rules).
+      match /verifications/{id} {
+        allow read: if owner(uid);
+        allow write: if false;
+      }
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -25,7 +25,7 @@ describe('AuthBoundary', () => {
     renderBoundary()
     expect(screen.getByLabelText('PIN')).toBeInTheDocument()
     expect(screen.queryByText('Private dashboard')).not.toBeInTheDocument()
-    expect(screen.getByText(/Demo access — use PIN 123456/i)).toBeInTheDocument()
+    expect(screen.getByText('Demo PIN: 123456')).toBeInTheDocument()
   })
 
   it('unlocks with the demo PIN and renders children', async () => {

@@ -32,5 +32,6 @@ export default defineConfig({
     command: `npm run dev -- --host 127.0.0.1 --port ${port}`,
     url: baseURL,
     reuseExistingServer: false,
+    env: { VITE_STORAGE: 'local' },
   },
 })

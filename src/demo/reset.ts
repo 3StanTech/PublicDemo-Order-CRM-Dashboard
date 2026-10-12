@@ -1,10 +1,13 @@
 import { LOCAL_DATABASE_NAME } from '../data/local-adapter'
+import { clearRemoteDemoData, storageMode } from '../data/adapter'
 
 export type ResetDemoDataOptions = {
-  /** Close the open storage adapter before deleting the database. */
+  /** Close the open storage adapter before deleting the data. */
   closeAdapter?: () => Promise<void>
   /** Override IndexedDB deletion (tests). */
   deleteDatabase?: (name: string) => Promise<void>
+  /** Override deletion of the visitor's Firestore changes (tests). */
+  clearRemoteData?: () => Promise<void>
   /** Override page reload (tests). */
   reload?: () => void
 }
@@ -24,16 +27,22 @@ function defaultDeleteDatabase(name: string): Promise<void> {
 }
 
 /**
- * Closes local storage, deletes the IndexedDB database, and reloads so
- * LocalAdapter.create() re-seeds sample data from scratch.
+ * Clears this visitor's changes and reloads so the sample data shows fresh.
+ * Local build: deletes the IndexedDB database (LocalAdapter re-seeds).
+ * Firestore build: deletes the visitor's saved changes; the seed is rebuilt in
+ * the browser on reload.
  */
 export async function resetDemoData(options: ResetDemoDataOptions = {}): Promise<void> {
   if (options.closeAdapter) {
     await options.closeAdapter()
   }
 
-  const deleteDatabase = options.deleteDatabase ?? defaultDeleteDatabase
-  await deleteDatabase(LOCAL_DATABASE_NAME)
+  if (storageMode() === 'firestore') {
+    await (options.clearRemoteData ?? clearRemoteDemoData)()
+  } else {
+    const deleteDatabase = options.deleteDatabase ?? defaultDeleteDatabase
+    await deleteDatabase(LOCAL_DATABASE_NAME)
+  }
 
   const reload = options.reload ?? (() => {
     window.location.reload()

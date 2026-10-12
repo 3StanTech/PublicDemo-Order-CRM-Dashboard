@@ -93,7 +93,7 @@ function PinGate({ onUnlocked }: PinGateProps) {
               type="password"
               value={pin}
             />
-            <p id="pin-hint" className="mt-2 text-center text-sm text-[#4A5365]">Demo access — use PIN 123456</p>
+            <p id="pin-hint" className="mt-2 text-center text-sm text-[#4A5365]">Demo PIN: 123456</p>
             {error && <p id="pin-error" className="motion-fade-in mt-2 text-sm font-medium text-[#A33B3B]" role="alert">{error}</p>}
           </div>
           <button

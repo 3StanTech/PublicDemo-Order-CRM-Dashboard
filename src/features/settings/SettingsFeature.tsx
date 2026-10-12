@@ -1,5 +1,6 @@
 import { AlertTriangle, Check, LoaderCircle, Save } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { useSyncGate } from '../../components/layout/AppShell'
 import type { ProductSlug } from '../../domain/contracts'
 import type { StorageAdapter } from '../../data/types'
 import { resetDemoData } from '../../demo/reset'
@@ -31,6 +32,7 @@ export function SettingsFeature({ adapter }: { adapter: StorageAdapter }) {
   const [error, setError] = useState<string | null>(null)
   const [resetConfirming, setResetConfirming] = useState(false)
   const [resetting, setResetting] = useState(false)
+  const { writesReady } = useSyncGate()
 
   useEffect(() => {
     let active = true
@@ -86,11 +88,12 @@ export function SettingsFeature({ adapter }: { adapter: StorageAdapter }) {
     <section className="rounded-2xl border border-[#4F74C8]/20 bg-white p-4 shadow-sm"><h2 className="text-lg font-black">Products</h2><p className="mt-1 text-sm text-[#4A5365]">Turn a product off to remove it from Import. This does not change historical orders.</p><div className="mt-4 space-y-3">{productSettingRows.map(({ slug, name }) => <div key={slug} className="grid gap-2 rounded-xl border border-[#4F74C8]/15 p-3 sm:grid-cols-[1fr_9rem_auto] sm:items-end"><Field label={name}><span className="relative block"><span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#4A5365]">₱</span><input aria-label={`${name} base price`} className={`${inputClass} pl-7`} type="number" min="0" step="1" value={phpInputValue(settings.productBasePrices[slug])} onChange={(event) => updateProduct(slug, { price: event.target.value })} /></span></Field><label className="flex min-h-11 items-center gap-2 rounded-xl border border-[#4F74C8]/20 px-3 text-sm font-bold"><input aria-label={`${name} availability`} type="checkbox" checked={settings.productAvailability[slug]} onChange={(event) => updateProduct(slug, { available: event.target.checked })} />Available</label></div>)}</div></section>
     <section className="rounded-2xl border border-[#4F74C8]/20 bg-white p-4 shadow-sm"><h2 className="text-lg font-black">Upcharges</h2><div className="mt-4 grid gap-4 sm:grid-cols-2"><UpchargeGroup title="Matcha levels" values={settings.matchaLevelUpcharges} onChange={(level, value) => update({ matchaLevelUpcharges: { ...settings.matchaLevelUpcharges, [level]: toCentavos(value, settings.matchaLevelUpcharges[level]) } })} /><UpchargeGroup title="Hojicha levels" values={settings.hojichaLevelUpcharges} onChange={(level, value) => update({ hojichaLevelUpcharges: { ...settings.hojichaLevelUpcharges, [level]: toCentavos(value, settings.hojichaLevelUpcharges[level]) } })} /></div><div className="mt-4 grid gap-3 sm:grid-cols-2"><MoneyField label="MK Isuzu powder" value={settings.powderUpcharges.mk_isuzu} onChange={(value) => update({ powderUpcharges: { ...settings.powderUpcharges, mk_isuzu: toCentavos(value, settings.powderUpcharges.mk_isuzu) } })} /><MoneyField label="Yumeno powder" value={settings.powderUpcharges.yumeno} onChange={(value) => update({ powderUpcharges: { ...settings.powderUpcharges, yumeno: toCentavos(value, settings.powderUpcharges.yumeno) } })} /></div></section>
     <section className="rounded-2xl border border-[#4F74C8]/20 bg-white p-4 shadow-sm"><h2 className="text-lg font-black">Thermal bags</h2><div className="mt-4 grid gap-3 sm:grid-cols-3"><MoneyField label="1 cup" value={settings.thermalBagPrices[1]} onChange={(value) => update({ thermalBagPrices: { ...settings.thermalBagPrices, 1: toCentavos(value, settings.thermalBagPrices[1]) } })} /><MoneyField label="2 cups" value={settings.thermalBagPrices[2]} onChange={(value) => update({ thermalBagPrices: { ...settings.thermalBagPrices, 2: toCentavos(value, settings.thermalBagPrices[2]) } })} /><MoneyField label="3–4 cups" value={settings.thermalBagPrices[3]} onChange={(value) => { const amount = toCentavos(value, settings.thermalBagPrices[3]); update({ thermalBagPrices: { ...settings.thermalBagPrices, 3: amount, 4: amount } }) }} /></div></section>
-    <button type="button" disabled={saving} onClick={() => void save()} className="flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#4F74C8] px-4 font-bold text-white shadow-sm transition duration-200 hover:bg-[#365aa8] active:scale-[0.98] motion-safe:transition-transform disabled:cursor-not-allowed disabled:opacity-60 disabled:active:scale-100"><Save aria-hidden="true" size={18} />{saving ? <><LoaderCircle aria-hidden="true" className="motion-safe:animate-spin" size={18} />Saving settings…</> : 'Save settings'}</button>
+    {!writesReady && <p id="settings-sync-note" className="-mb-2 text-sm font-semibold text-[#36579E]">Saving is paused until your saved changes load.</p>}
+    <button type="button" disabled={saving || !writesReady} aria-describedby={writesReady ? undefined : 'settings-sync-note'} onClick={() => void save()} className="flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#4F74C8] px-4 font-bold text-white shadow-sm transition duration-200 hover:bg-[#365aa8] active:scale-[0.98] motion-safe:transition-transform disabled:cursor-not-allowed disabled:opacity-60 disabled:active:scale-100"><Save aria-hidden="true" size={18} />{saving ? <><LoaderCircle aria-hidden="true" className="motion-safe:animate-spin" size={18} />Saving settings…</> : 'Save settings'}</button>
     <p className="flex gap-2 rounded-xl border border-[#4F74C8]/20 bg-[#FBF3D5]/60 p-3 text-sm text-[#4A5365]"><AlertTriangle aria-hidden="true" className="shrink-0 text-[#4F74C8]" size={18} />Pricing changes apply to new imports. Existing orders retain their recorded totals.</p>
     <section className="rounded-2xl border border-red-200 bg-red-50/60 p-4 shadow-sm" aria-labelledby="demo-data-heading">
       <h2 id="demo-data-heading" className="text-lg font-black text-red-900">Demo data</h2>
-      <p className="mt-1.5 text-sm leading-6 text-red-900/80">Restores the sample orders and customers. Anything you changed here is discarded.</p>
+      <p className="mt-1.5 text-sm leading-6 text-red-900/80">Clears only the changes you made, then restores the sample orders and customers.</p>
       <div className="mt-4 flex flex-col gap-2 sm:flex-row">
         <button
           type="button"
@@ -98,7 +101,7 @@ export function SettingsFeature({ adapter }: { adapter: StorageAdapter }) {
           onClick={() => void handleResetDemo()}
           className="flex min-h-12 flex-1 items-center justify-center rounded-xl bg-red-700 px-4 font-bold text-white shadow-sm transition duration-200 hover:bg-red-800 active:scale-[0.98] motion-safe:transition-transform disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {resetting ? 'Resetting…' : resetConfirming ? 'Tap again to confirm reset' : 'Reset demo data'}
+          {resetting ? 'Resetting…' : resetConfirming ? 'Tap again to confirm reset' : 'Reset my demo data'}
         </button>
         {resetConfirming && !resetting && (
           <button

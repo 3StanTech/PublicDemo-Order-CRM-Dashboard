@@ -1,13 +1,15 @@
 import { ArrowLeft, ChevronRight, Plus, Save, Search, Trash2 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import type { StorageAdapter, StoredCustomer, StoredOrder } from '../../data/types'
 import { OrderEditorModal } from '../order-editor/OrderEditorModal'
 import { storedOrderToImportDraft } from '../order-editor/orderDraftMapping'
 import { relevantDeliveryDate } from '../today/delivery-dates'
 import { formatCupNames } from '../import/cup-names'
+import { useSyncGate } from '../../components/layout/AppShell'
 import { lifecycleTimestampLines } from '../orders/order-timestamps'
-import { loadCustomerProfile, saveCustomerProfile, type CustomerProfile } from './customer-profile'
+import { VerificationChip } from '../orders/VerificationChip'
+import { customerProfileKey, loadCustomerProfile, saveCustomerProfile, type CustomerProfile } from './customer-profile'
 import { getCustomerSummaries, type CustomerSummary } from './customer-stats'
 import { deleteCustomerCascade } from './deleteCustomerCascade'
 
@@ -98,21 +100,49 @@ function CustomerDetail({ adapter, summary, orders, customers }: { adapter: Stor
   const [deleting, setDeleting] = useState(false)
 
   const [repeatOrderOpen, setRepeatOrderOpen] = useState(false)
+  const { writesReady } = useSyncGate()
 
   const customerOrders = useMemo(
     () => orders.filter((order) => order.customerId === summary.customer.id).sort((left, right) => right.createdAt.localeCompare(left.createdAt)),
     [orders, summary.customer.id],
   )
 
+  // Saved details load only after the visitor's saved changes have (Firebase build), and a
+  // reload never overwrites what the owner is typing.
+  const [profileLoaded, setProfileLoaded] = useState(false)
+  const profileDirty = useRef(false)
   useEffect(() => {
+    profileDirty.current = false
+    setProfileLoaded(false)
+  }, [summary.customer.id])
+
+  useEffect(() => {
+    if (!writesReady) return
     let active = true
-    void loadCustomerProfile(adapter, summary.customer.id)
-      .then((stored) => {
-        if (active) setProfile({ ...stored, address: stored.address || summary.addressSummary || '' })
-      })
-      .catch(() => { if (active) setLoadError('Customer details could not be loaded.') })
-    return () => { active = false }
-  }, [adapter, summary.addressSummary, summary.customer.id])
+    let latest = 0
+    const profileKey = customerProfileKey(summary.customer.id)
+    const load = () => {
+      const request = ++latest
+      void loadCustomerProfile(adapter, summary.customer.id)
+        .then((stored) => {
+          if (!active || request !== latest) return
+          if (!profileDirty.current) setProfile({ ...stored, address: stored.address || summary.addressSummary || '' })
+          setProfileLoaded(true)
+        })
+        .catch(() => { if (active) setLoadError('Customer details could not be loaded.') })
+    }
+    load()
+    const unsubscribe = adapter.subscribe((change) => {
+      if (change.collection === 'settings' && 'key' in change.entity && change.entity.key === profileKey) load()
+    })
+    return () => { active = false; unsubscribe() }
+  }, [adapter, summary.addressSummary, summary.customer.id, writesReady])
+
+  const editProfile = (next: CustomerProfile) => {
+    profileDirty.current = true
+    setSaved(false)
+    setProfile(next)
+  }
 
   useEffect(() => {
     setName(summary.customer.name)
@@ -124,6 +154,7 @@ function CustomerDetail({ adapter, summary, orders, customers }: { adapter: Stor
     setSaved(false)
     try {
       await saveCustomerProfile(adapter, summary.customer.id, profile)
+      profileDirty.current = false
       setSaved(true)
     } catch {
       setLoadError('Customer details could not be saved.')
@@ -182,12 +213,12 @@ function CustomerDetail({ adapter, summary, orders, customers }: { adapter: Stor
           </div>
           <div className="mt-3 space-y-3">
             <label className="block text-sm font-bold text-[#20242F]">Name
-              <input value={name} onChange={(event) => setName(event.target.value)} className="mt-1 block w-full rounded-xl border border-[#4F74C8]/30 bg-[#FBF3D5]/35 p-3 font-normal outline-none transition-colors focus:border-[#4F74C8]" placeholder="Customer name" />
+              <input value={name} onChange={(event) => setName(event.target.value)} className="mt-1 block w-full rounded-xl border border-[#4F74C8]/30 bg-[#FBF3D5]/35 p-3 font-normal outline-none transition-colors focus:border-[#4F74C8] disabled:opacity-60" placeholder="Customer name" />
             </label>
             <label className="block text-sm font-bold text-[#20242F]">Phone
-              <input value={phone} onChange={(event) => setPhone(event.target.value)} className="mt-1 block w-full rounded-xl border border-[#4F74C8]/30 bg-[#FBF3D5]/35 p-3 font-normal outline-none transition-colors focus:border-[#4F74C8]" placeholder="09XXXXXXXXX" />
+              <input value={phone} onChange={(event) => setPhone(event.target.value)} className="mt-1 block w-full rounded-xl border border-[#4F74C8]/30 bg-[#FBF3D5]/35 p-3 font-normal outline-none transition-colors focus:border-[#4F74C8] disabled:opacity-60" placeholder="09XXXXXXXXX" />
             </label>
-            <button type="button" onClick={() => void handleSaveContact()} disabled={savingContact || !name.trim()} className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-[#4F74C8] px-4 text-sm font-bold text-white transition duration-200 hover:bg-[#365AA9] active:scale-[0.98] motion-safe:transition-transform disabled:opacity-60 disabled:active:scale-100">
+            <button type="button" onClick={() => void handleSaveContact()} disabled={savingContact || !writesReady || !name.trim()} className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-[#4F74C8] px-4 text-sm font-bold text-white transition duration-200 hover:bg-[#365AA9] active:scale-[0.98] motion-safe:transition-transform disabled:opacity-60 disabled:active:scale-100">
               <Save aria-hidden="true" size={17} /> {savingContact ? 'Saving…' : 'Save contact info'}
             </button>
           </div>
@@ -200,15 +231,15 @@ function CustomerDetail({ adapter, summary, orders, customers }: { adapter: Stor
           </div>
           <div className="mt-3 space-y-3">
             <label className="block text-sm font-bold text-[#20242F]">Address
-              <textarea value={profile.address} onChange={(event) => setProfile({ ...profile, address: event.target.value })} rows={2} className="mt-1 block w-full resize-y rounded-xl border border-[#4F74C8]/30 bg-[#FBF3D5]/35 p-3 font-normal outline-none transition-colors focus:border-[#4F74C8]" placeholder="Delivery address" />
+              <textarea value={profile.address} disabled={!profileLoaded} onChange={(event) => editProfile({ ...profile, address: event.target.value })} rows={2} className="mt-1 block w-full resize-y rounded-xl border border-[#4F74C8]/30 bg-[#FBF3D5]/35 p-3 font-normal outline-none transition-colors focus:border-[#4F74C8] disabled:opacity-60" placeholder="Delivery address" />
             </label>
             <label className="block text-sm font-bold text-[#20242F]">Notes
-              <textarea value={profile.notes} onChange={(event) => setProfile({ ...profile, notes: event.target.value })} rows={3} className="mt-1 block w-full resize-y rounded-xl border border-[#4F74C8]/30 bg-[#FBF3D5]/35 p-3 font-normal outline-none transition-colors focus:border-[#4F74C8]" placeholder="Helpful service notes" />
+              <textarea value={profile.notes} disabled={!profileLoaded} onChange={(event) => editProfile({ ...profile, notes: event.target.value })} rows={3} className="mt-1 block w-full resize-y rounded-xl border border-[#4F74C8]/30 bg-[#FBF3D5]/35 p-3 font-normal outline-none transition-colors focus:border-[#4F74C8] disabled:opacity-60" placeholder="Helpful service notes" />
             </label>
             <label className="block text-sm font-bold text-[#20242F]">Saved preferences
-              <textarea value={profile.preferences} onChange={(event) => setProfile({ ...profile, preferences: event.target.value })} rows={2} className="mt-1 block w-full resize-y rounded-xl border border-[#4F74C8]/30 bg-[#FBF3D5]/35 p-3 font-normal outline-none transition-colors focus:border-[#4F74C8]" placeholder="Sweetness, pickup, or delivery preferences" />
+              <textarea value={profile.preferences} disabled={!profileLoaded} onChange={(event) => editProfile({ ...profile, preferences: event.target.value })} rows={2} className="mt-1 block w-full resize-y rounded-xl border border-[#4F74C8]/30 bg-[#FBF3D5]/35 p-3 font-normal outline-none transition-colors focus:border-[#4F74C8] disabled:opacity-60" placeholder="Sweetness, pickup, or delivery preferences" />
             </label>
-            <button type="button" onClick={() => void handleSave()} disabled={saving} className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-[#4F74C8] px-4 text-sm font-bold text-white transition duration-200 hover:bg-[#365AA9] active:scale-[0.98] motion-safe:transition-transform disabled:opacity-60 disabled:active:scale-100">
+            <button type="button" onClick={() => void handleSave()} disabled={saving || !writesReady || !profileLoaded} className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-[#4F74C8] px-4 text-sm font-bold text-white transition duration-200 hover:bg-[#365AA9] active:scale-[0.98] motion-safe:transition-transform disabled:opacity-60 disabled:active:scale-100">
               <Save aria-hidden="true" size={17} /> {saving ? 'Saving…' : 'Save details'}
             </button>
             {loadError && <p role="alert" className="motion-fade-in text-sm font-semibold text-red-700">{loadError}</p>}
@@ -222,7 +253,7 @@ function CustomerDetail({ adapter, summary, orders, customers }: { adapter: Stor
               <article key={order.id} className="rounded-2xl border border-[#4F74C8]/20 bg-white p-4 shadow-sm transition-shadow duration-200 hover:shadow-md">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0"><p className="font-bold">{formatDate(order)}</p><p className="mt-1 text-sm capitalize text-[#4A5365]">{statusLabel(order.status)}</p></div>
-                  <p className="shrink-0 font-black text-[#4F74C8]">{formatCurrency(order.totalCentavos)}</p>
+                  <div className="flex shrink-0 flex-col items-end gap-1"><p className="font-black text-[#4F74C8]">{formatCurrency(order.totalCentavos)}</p><VerificationChip orderId={order.id} /></div>
                 </div>
                 <ul className="mt-3 space-y-1 text-sm text-[#4A5365]">
                   {order.items.map((item) => <li key={item.id}>{item.quantity}× {item.productName}{formatCupNames(item.modifiers.cupNames) && <span className="text-[#36579E]"> · {formatCupNames(item.modifiers.cupNames)}</span>}</li>)}
@@ -240,7 +271,7 @@ function CustomerDetail({ adapter, summary, orders, customers }: { adapter: Stor
           <h2 id="danger-zone-heading" className="text-lg font-black text-rose-900">Danger zone</h2>
           <p className="mt-1 text-sm text-rose-800">Deletes this customer and all of their orders permanently.</p>
           {deleteStep === 0 && (
-            <button type="button" onClick={() => setDeleteStep(1)} className="mt-3 inline-flex min-h-11 items-center gap-2 rounded-xl border border-rose-400 px-4 text-sm font-bold text-rose-800 transition-colors duration-200 hover:bg-rose-100">
+            <button type="button" disabled={!writesReady} onClick={() => setDeleteStep(1)} className="mt-3 inline-flex min-h-11 items-center gap-2 rounded-xl border border-rose-400 px-4 text-sm font-bold text-rose-800 transition-colors duration-200 hover:bg-rose-100 disabled:opacity-50">
               <Trash2 aria-hidden="true" size={16} /> Delete customer
             </button>
           )}
@@ -248,7 +279,7 @@ function CustomerDetail({ adapter, summary, orders, customers }: { adapter: Stor
             <div role="alert" className="motion-fade-up mt-3 rounded-xl bg-rose-100 p-3 text-sm text-rose-950">
               <p>Delete {summary.customer.name} and their {customerOrders.length} {customerOrders.length === 1 ? 'order' : 'orders'}? This cannot be undone.</p>
               <div className="mt-2 flex gap-2">
-                <button type="button" onClick={() => setDeleteStep(2)} className="rounded-lg bg-rose-700 px-3 py-1.5 font-bold text-white transition duration-200 hover:bg-rose-800 active:scale-[0.97] motion-safe:transition-transform">Continue</button>
+                <button type="button" disabled={!writesReady} onClick={() => setDeleteStep(2)} className="rounded-lg bg-rose-700 px-3 py-1.5 font-bold text-white transition duration-200 hover:bg-rose-800 active:scale-[0.97] motion-safe:transition-transform">Continue</button>
                 <button type="button" onClick={() => setDeleteStep(0)} className="rounded-lg px-3 py-1.5 font-semibold text-[#36579E] transition-colors duration-200 hover:bg-black/5">Cancel</button>
               </div>
             </div>
@@ -257,7 +288,7 @@ function CustomerDetail({ adapter, summary, orders, customers }: { adapter: Stor
             <div role="alert" className="motion-fade-up mt-3 rounded-xl bg-rose-100 p-3 text-sm text-rose-950">
               <p>This is permanent. Delete {summary.customer.name} permanently?</p>
               <div className="mt-2 flex gap-2">
-                <button type="button" disabled={deleting} onClick={() => void handleDeleteCustomer()} className="rounded-lg bg-rose-700 px-3 py-1.5 font-bold text-white transition duration-200 hover:bg-rose-800 active:scale-[0.97] motion-safe:transition-transform disabled:opacity-50">Yes, delete permanently</button>
+                <button type="button" disabled={deleting || !writesReady} onClick={() => void handleDeleteCustomer()} className="rounded-lg bg-rose-700 px-3 py-1.5 font-bold text-white transition duration-200 hover:bg-rose-800 active:scale-[0.97] motion-safe:transition-transform disabled:opacity-50">Yes, delete permanently</button>
                 <button type="button" disabled={deleting} onClick={() => setDeleteStep(0)} className="rounded-lg px-3 py-1.5 font-semibold text-[#36579E] transition-colors duration-200 hover:bg-black/5 disabled:opacity-50">Cancel</button>
               </div>
             </div>

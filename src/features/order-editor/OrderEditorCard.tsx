@@ -1,5 +1,6 @@
 import { LoaderCircle, Plus, Trash2 } from 'lucide-react'
 import { useMemo } from 'react'
+import { useSyncGate } from '../../components/layout/AppShell'
 import { getRuntimeCatalog } from '../../domain/catalog'
 import type { StoredCustomer, StoredOrder } from '../../data/types'
 import { applyCustomerMatch } from '../import/customer-matching'
@@ -38,6 +39,7 @@ export function OrderEditorCard({ draft, customers, orders, confirming, onChange
   // oxlint-disable-next-line react-hooks/exhaustive-deps
   const validation = useMemo(() => validateDraft(draft), [draft, catalog])
   const mutate = (next: ImportDraft) => onChange(applyCustomerMatch(next, customers, orders))
+  const { writesReady } = useSyncGate()
   return (
     <article className="rounded-2xl border border-[#4F74C8]/20 bg-[#FFFDF6] p-4 shadow-sm">
       <div className="mb-4 flex items-start justify-between gap-3">
@@ -75,7 +77,8 @@ export function OrderEditorCard({ draft, customers, orders, confirming, onChange
         </div>)}
       </div>
       <div className="mt-5"><div className="flex items-center justify-between"><h3 className="font-semibold">Thermal bags</h3><button type="button" className="rounded-lg px-2 py-1 text-sm font-semibold text-[#365aa8] transition-colors duration-200 hover:bg-[#4F74C8]/10" onClick={() => onChange({ ...draft, thermalBags: [...draft.thermalBags, blankBag()] })}><Plus className="mr-1 inline" size={15} />Add bag</button></div>{draft.thermalBags.map((bag, index) => <div className="motion-fade-up mt-2 flex items-end gap-2" key={bag.id}><FieldLabel>Bag {index + 1} covers<SelectInput aria-label={`Thermal bag ${index + 1}`} value={bag.coveredCupCount ?? ''} onChange={(event) => onChange({ ...draft, thermalBags: draft.thermalBags.map((entry) => entry.id === bag.id ? { ...entry, coveredCupCount: event.target.value ? Number(event.target.value) : null } : entry) })}><option value="">Unresolved</option><option value="1">1 cup</option><option value="2">2 cups</option><option value="3">3 cups</option><option value="4">4 cups</option></SelectInput></FieldLabel><button type="button" aria-label={`Remove thermal bag ${index + 1}`} className="min-h-11 rounded-xl px-2 text-[#4A5365] transition-colors duration-200 hover:bg-rose-50 hover:text-rose-700" onClick={() => onChange({ ...draft, thermalBags: draft.thermalBags.filter((entry) => entry.id !== bag.id) })}><Trash2 size={16} /></button></div>)}</div>
-      <button type="button" disabled={confirming || validation.errors.length > 0} onClick={onConfirm} className="mt-5 flex min-h-12 w-full items-center justify-center rounded-xl bg-[#4F74C8] px-4 font-bold text-white shadow-sm transition duration-200 hover:bg-[#365AA9] active:scale-[0.98] motion-safe:transition-transform disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100">{confirming && <LoaderCircle className="mr-2 motion-safe:animate-spin" size={17} />}Confirm order</button>
+      {!writesReady && <p id="order-editor-sync-note" className="-mb-2 mt-5 text-sm font-semibold text-[#36579E]">Saving is paused until your saved changes load.</p>}
+      <button type="button" disabled={confirming || !writesReady || validation.errors.length > 0} aria-describedby={writesReady ? undefined : 'order-editor-sync-note'} onClick={onConfirm} className="mt-5 flex min-h-12 w-full items-center justify-center rounded-xl bg-[#4F74C8] px-4 font-bold text-white shadow-sm transition duration-200 hover:bg-[#365AA9] active:scale-[0.98] motion-safe:transition-transform disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100">{confirming && <LoaderCircle className="mr-2 motion-safe:animate-spin" size={17} />}Confirm order</button>
     </article>
   )
 }

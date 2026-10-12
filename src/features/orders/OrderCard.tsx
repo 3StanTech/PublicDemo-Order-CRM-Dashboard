@@ -1,9 +1,11 @@
 import { useState } from 'react'
+import { useSyncGate } from '../../components/layout/AppShell'
 import type { StoredCustomer, StoredOrder } from '../../data/types'
 import { formatCupNames } from '../import/cup-names'
 import { cupCount, formatPhp } from './order-display'
 import { canAdvance, canCancel, nextAction, nextStatus, statusLabels } from './orderLifecycle'
 import { lifecycleTimestampLines } from './order-timestamps'
+import { VerificationChip } from './VerificationChip'
 
 type OrderCardProps = {
   order: StoredOrder
@@ -17,7 +19,9 @@ type OrderCardProps = {
   onDelete?: (order: StoredOrder) => Promise<void>
 }
 
-export function OrderCard({ order, customer, busy = false, onAdvance, onCancel, onEdit, onDelete }: OrderCardProps) {
+export function OrderCard({ order, customer, busy: busyProp = false, onAdvance, onCancel, onEdit, onDelete }: OrderCardProps) {
+  const { writesReady } = useSyncGate()
+  const busy = busyProp || !writesReady
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const next = nextStatus(order.status)
@@ -40,6 +44,7 @@ export function OrderCard({ order, customer, busy = false, onAdvance, onCancel, 
           <h3 className="truncate text-base font-bold text-[#20242F]">{customer?.name ?? 'Unknown customer'}</h3>
           <p className="mt-1 text-sm text-[#4A5365]">{cupCount(order)} {cupCount(order) === 1 ? 'cup' : 'cups'} · {formatPhp(order.totalCentavos)}</p>
         </div>
+        <VerificationChip orderId={order.id} />
       </div>
 
       <ul className="mt-3 space-y-1">

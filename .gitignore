@@ -54,3 +54,10 @@ playwright/.cache/
 *.key
 
 # <<< repo-hygiene <<<
+
+# Firebase
+functions/lib/
+.firebase/
+firebase-debug.log*
+firestore-debug.log*
+ui-debug.log*

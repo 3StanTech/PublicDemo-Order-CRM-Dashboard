@@ -34,13 +34,20 @@ const BANNED = [
   'netlify/functions',
 ]
 
-const SCAN_ROOTS = ['src', 'e2e', 'test', 'scripts', 'public', 'index.html', 'dist']
+// `dist` is the shipped build and `functions` is the deployed Cloud Function
+// source. A root that does not exist (for example `dist` before a build) is skipped.
+const SCAN_ROOTS = ['src', 'e2e', 'test', 'tests', 'scripts', 'public', 'index.html', 'functions', 'dist']
 const ROOT_CONFIG_NAMES = [
   'package.json',
   'package-lock.json',
   'vite.config.ts',
   'vercel.json',
+  'firebase.json',
+  'firestore.rules',
+  'firestore.indexes.json',
+  '.firebaserc',
   'playwright.config.ts',
+  'vitest.rules.config.ts',
   'tsconfig.json',
   'tsconfig.app.json',
   'tsconfig.node.json',
@@ -51,6 +58,9 @@ const ROOT_CONFIG_NAMES = [
 ]
 
 const SKIP_DIR_NAMES = new Set(['node_modules', '.git'])
+// Generated bundle of functions/src plus the shared pricing engine; both are
+// scanned from source, so the build output is not scanned again.
+const SKIP_DIR_PATHS = new Set(['functions/lib'])
 
 /** @type {{ file: string, line: number, token: string }[]} */
 const hits = []
@@ -70,7 +80,9 @@ function collectFiles(entryPath, out) {
   if (!st.isDirectory()) return
   for (const name of readdirSync(entryPath)) {
     if (shouldSkipDir(name)) continue
-    collectFiles(join(entryPath, name), out)
+    const child = join(entryPath, name)
+    if (SKIP_DIR_PATHS.has(relative(root, child).replaceAll('\\', '/'))) continue
+    collectFiles(child, out)
   }
 }
 
@@ -115,7 +127,11 @@ function findEnvFiles(dir, out) {
 }
 
 function checkPackageDeps() {
-  const pkgPath = join(root, 'package.json')
+  for (const manifest of ['package.json', 'functions/package.json']) checkManifest(manifest)
+}
+
+function checkManifest(manifest) {
+  const pkgPath = join(root, manifest)
   if (!existsSync(pkgPath)) return
   const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'))
   for (const section of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
@@ -123,7 +139,7 @@ function checkPackageDeps() {
     if (!deps || typeof deps !== 'object') continue
     for (const name of Object.keys(deps)) {
       if (name.startsWith('@supabase/') || name.startsWith('@sentry/')) {
-        hits.push({ file: 'package.json', line: 0, token: name })
+        hits.push({ file: manifest, line: 0, token: name })
       }
     }
   }

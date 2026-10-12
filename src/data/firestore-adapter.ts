@@ -294,6 +294,8 @@ export class FirestoreAdapter implements StorageAdapter {
 
   private readonly pending = new Map<string, PendingWrite>()
   private readonly laneFreeAt = new Map<string, number>()
+  /** Delta docs whose latest snapshot still carries this tab's unacknowledged writes. */
+  private readonly unconfirmed = new Set<string>()
   private writeVersion = 0
   private draining = false
   private drainTimer: ReturnType<typeof setTimeout> | undefined
@@ -328,6 +330,7 @@ export class FirestoreAdapter implements StorageAdapter {
 
   /** Sends queued writes now (page hidden or closing); localStorage still covers a lost flush. */
   private flushNow(): void {
+    if (this.resetting) return
     for (const orderId of [...this.itemDrafts.keys()]) this.flushDraft(orderId)
     if (this.pending.size === 0) return
     this.urgent = true
@@ -403,7 +406,9 @@ export class FirestoreAdapter implements StorageAdapter {
    * are removed by the function when their orders are deleted.
    */
   async clearVisitorData(): Promise<void> {
+    // Lock first: startup replay and late edits are refused until the reset ends.
     this.resetting = true
+    await this.readyPromise.catch(() => undefined)
     for (const draft of this.itemDrafts.values()) clearTimeout(draft.timer)
     this.itemDrafts.clear()
     // Kept aside so a failed reset leaves the visitor's unsent edits queued.
@@ -426,13 +431,19 @@ export class FirestoreAdapter implements StorageAdapter {
         await batch.commit()
       }
       cleared = true
+      // Anything queued meanwhile targeted the deleted data: nothing is re-sent.
+      this.pending.clear()
+      for (const draft of this.itemDrafts.values()) clearTimeout(draft.timer)
+      this.itemDrafts.clear()
       writeStoredPending(uid, [])
     } finally {
+      this.resetting = false
       if (!cleared) {
         for (const [docKey, write] of unsent) if (!this.pending.has(docKey)) this.pending.set(docKey, write)
+        // A reconnect during the reset skipped the replay; catch up now.
+        if (this.status.state === 'ready') this.restorePending()
         this.scheduleDrain(0)
       }
-      this.resetting = false
     }
   }
 
@@ -470,6 +481,8 @@ export class FirestoreAdapter implements StorageAdapter {
     this.orderMeta.clear()
     this.verifications.clear()
     this.knownDocs.clear()
+    // Rebuilt from the fresh listeners' first snapshots.
+    this.unconfirmed.clear()
   }
 
   private async connect(generation: number): Promise<void> {
@@ -535,16 +548,43 @@ export class FirestoreAdapter implements StorageAdapter {
 
   /** Replays writes a previous page load queued but did not send (once server state is known). */
   private restorePending(): void {
-    if (this.uid === null) return
+    if (this.uid === null || this.resetting) return
     for (const stored of readStoredPending(this.uid)) {
       const docKey = `${stored.coll}/${stored.key}`
-      if (this.pending.has(docKey)) continue
+      if (this.pending.has(docKey) || this.serverHas(stored)) continue
       const before = this.recordFor(stored.coll, stored.key)
       this.pending.set(docKey, { ...stored, version: ++this.writeVersion, failed: false })
       this.emitDiff(stored.coll, before, this.recordFor(stored.coll, stored.key))
       if (stored.coll === 'orders') this.notifyVerification(stored.key)
     }
     this.persistPending()
+  }
+
+  /** True when the server already holds this write (acknowledged before its mirror entry was removed). */
+  private serverHas(stored: StoredPendingWrite): boolean {
+    const onServer = this.server[stored.coll].get(stored.key)
+    if (!onServer || this.unconfirmed.has(`${stored.coll}/${stored.key}`)) return false
+    if (onServer.deleted || stored.delta.deleted) return onServer.deleted && stored.delta.deleted
+    const record = stored.coll === 'orders'
+      ? { ...(stored.delta.record as StoredOrder), items: sortItems((stored.delta.record as StoredOrder).items) }
+      : stored.delta.record
+    return stableStringify(record) === stableStringify(onServer.record)
+  }
+
+  /**
+   * A queued write held back while the SDK still had an unacknowledged write for the
+   * same document (one persisted by a previous load): drop it if the server now holds
+   * it, otherwise let the drain send it once the write gap has passed.
+   */
+  private settleDeferred(docKey: string, fromCache: boolean): void {
+    const write = this.pending.get(docKey)
+    if (!write) return
+    // A cache-only rollback may show stale state: only the server's view can drop a write.
+    if (!fromCache && this.serverHas(write)) {
+      this.pending.delete(docKey)
+      this.persistPending()
+    }
+    this.scheduleDrain(0)
   }
 
   /** Mirrors the unsent queue to localStorage so a reload cannot lose a saved change. */
@@ -573,12 +613,28 @@ export class FirestoreAdapter implements StorageAdapter {
       if (change.type === 'removed') {
         this.server[coll].delete(id)
         this.knownDocs.delete(`${coll}/${id}`)
+        // A deferred write whose rolled-back original vanished can now be sent.
+        if (this.unconfirmed.delete(`${coll}/${id}`)) this.scheduleDrain(0)
         if (coll === 'orders') this.orderMeta.delete(id)
       } else {
         const data = change.doc.data({ serverTimestamps: 'estimate' })
         const delta = fromDocument(coll, data)
         this.knownDocs.add(`${coll}/${id}`)
+        const docKey = `${coll}/${id}`
+        const local = change.doc.metadata.hasPendingWrites
+        const confirmedNow = !local && this.unconfirmed.delete(docKey)
+        if (local) this.unconfirmed.add(docKey)
+        // The rules' per-document write gap counts from the server's last write. Only a
+        // confirmed timestamp counts (a pending one is a local estimate), and the wait is
+        // capped at one gap from now so clock skew cannot stretch it.
+        const updatedAt = local ? null : millis(data.updatedAt)
+        if (updatedAt !== null) {
+          const now = Date.now()
+          const serverFree = Math.min(updatedAt + DOC_WRITE_GAP_MS, now + DOC_WRITE_GAP_MS)
+          this.laneFreeAt.set(docKey, Math.max(this.laneFreeAt.get(docKey) ?? 0, serverFree))
+        }
         if (delta) (this.server[coll] as Map<string, typeof delta>).set(id, delta)
+        if (confirmedNow) this.settleDeferred(docKey, snapshot.metadata.fromCache)
         if (coll === 'orders') this.orderMeta.set(id, { updatedAt: millis(data.updatedAt), pendingWrite: change.doc.metadata.hasPendingWrites })
       }
       this.emitDiff(coll, before, this.recordFor(coll, id))
@@ -646,6 +702,8 @@ export class FirestoreAdapter implements StorageAdapter {
 
   /** Records a delta optimistically and schedules its flush. */
   private stage<C extends DeltaCollection>(coll: C, key: string, delta: Delta<DeltaRecord[C]>): void {
+    // An edit that passed beforeWrite before a reset started must not land during it.
+    if (this.resetting) throw new Error('Your demo data is being reset.')
     const docKey = `${coll}/${key}`
     if (!delta.deleted && coll === 'orders') validateOrder(delta.record as StoredOrder)
     this.assertCapacity(docKey)
@@ -672,6 +730,7 @@ export class FirestoreAdapter implements StorageAdapter {
    * reverts to its last queued state) and nothing is queued.
    */
   private editItems(order: StoredOrder, items: StoredOrderItem[]): void {
+    if (this.resetting) throw new Error('Your demo data is being reset.')
     const record: StoredOrder = { ...order, items: sortItems(items) }
     try {
       validateOrder(record)
@@ -741,7 +800,8 @@ export class FirestoreAdapter implements StorageAdapter {
         let next: PendingWrite | null = null
         let nextAt = Infinity
         for (const [docKey, write] of this.pending) {
-          if (write.failed || (write.coll === 'orders' && settingsPending)) continue
+          // A document with an unacknowledged SDK write waits for its confirmation (settleDeferred).
+          if (write.failed || this.unconfirmed.has(docKey) || (write.coll === 'orders' && settingsPending)) continue
           const laneFree = this.laneFreeAt.get(docKey) ?? 0
           const at = this.urgent ? laneFree : Math.max(write.changedAt + DEBOUNCE_MS, laneFree)
           if (at < nextAt) { nextAt = at; next = write }

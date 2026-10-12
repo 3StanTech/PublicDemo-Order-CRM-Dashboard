@@ -199,8 +199,42 @@ describe('FirestoreAdapter unsent-write replay', () => {
     syncFromServer(new Set([path]))
     await adapter.ready
 
+    // Kept, but not sent while the persisted original is still unacknowledged.
     expect(localStorage.getItem(mirrorKey)).toContain(orderId)
     await vi.advanceTimersByTimeAsync(5_000)
+    expect(orderWrites()).toEqual([])
+
+    // The original is acknowledged: the matching replay entry is dropped, not re-sent.
+    fake.listeners.get(`${profilePath}/orders`)?.({
+      metadata: { fromCache: false },
+      docChanges: () => [{ type: 'modified', doc: { id: orderId, data: () => fake.docs.get(path), metadata: { hasPendingWrites: false } } }],
+    })
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(orderWrites()).toEqual([])
+    expect(localStorage.getItem(mirrorKey)).toBeNull()
+  })
+
+  it('sends a changed replay entry only after the unacknowledged original is confirmed', async () => {
+    const { items, ...stored } = order
+    const path = `${profilePath}/orders/${orderId}`
+    fake.docs.set(profilePath, { docs: 1 })
+    fake.docs.set(path, { deleted: false, order: stored, items, clientTotalCentavos: 0, updatedAt: Date.now() })
+    const changed = { ...order, notes: 'Leave at the gate' }
+    localStorage.setItem(mirrorKey, JSON.stringify([{ coll: 'orders', key: orderId, delta: { deleted: false, record: changed }, changedAt: Date.now() - 1_000 }]))
+    const adapter = await freshAdapter()
+
+    syncFromServer(new Set([path]))
+    await adapter.ready
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(orderWrites()).toEqual([])
+
+    fake.listeners.get(`${profilePath}/orders`)?.({
+      metadata: { fromCache: false },
+      docChanges: () => [{ type: 'modified', doc: { id: orderId, data: () => ({ ...fake.docs.get(path), updatedAt: Date.now() }), metadata: { hasPendingWrites: false } } }],
+    })
+    await vi.advanceTimersByTimeAsync(500)
+    expect(orderWrites()).toEqual([])
+    await vi.advanceTimersByTimeAsync(1_000)
     expect(orderWrites()).toEqual([{ type: 'set', path }])
   })
 

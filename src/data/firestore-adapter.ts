@@ -569,6 +569,21 @@ export class FirestoreAdapter implements StorageAdapter {
     return stableStringify(record) === stableStringify(onServer.record)
   }
 
+  /**
+   * A queued write held back while the SDK still had an unacknowledged write for the
+   * same document (one persisted by a previous load): drop it if the server now holds
+   * it, otherwise let the drain send it once the write gap has passed.
+   */
+  private settleDeferred(docKey: string): void {
+    const write = this.pending.get(docKey)
+    if (!write) return
+    if (this.serverHas(write)) {
+      this.pending.delete(docKey)
+      this.persistPending()
+    }
+    this.scheduleDrain(0)
+  }
+
   /** Mirrors the unsent queue to localStorage so a reload cannot lose a saved change. */
   private persistPending(): void {
     if (this.uid === null) return
@@ -603,8 +618,8 @@ export class FirestoreAdapter implements StorageAdapter {
         this.knownDocs.add(`${coll}/${id}`)
         const docKey = `${coll}/${id}`
         const local = change.doc.metadata.hasPendingWrites
+        const confirmedNow = !local && this.unconfirmed.delete(docKey)
         if (local) this.unconfirmed.add(docKey)
-        else this.unconfirmed.delete(docKey)
         // The rules' per-document write gap counts from the server's last write. Only a
         // confirmed timestamp counts (a pending one is a local estimate), and the wait is
         // capped at one gap from now so clock skew cannot stretch it.
@@ -615,6 +630,7 @@ export class FirestoreAdapter implements StorageAdapter {
           this.laneFreeAt.set(docKey, Math.max(this.laneFreeAt.get(docKey) ?? 0, serverFree))
         }
         if (delta) (this.server[coll] as Map<string, typeof delta>).set(id, delta)
+        if (confirmedNow) this.settleDeferred(docKey)
         if (coll === 'orders') this.orderMeta.set(id, { updatedAt: millis(data.updatedAt), pendingWrite: change.doc.metadata.hasPendingWrites })
       }
       this.emitDiff(coll, before, this.recordFor(coll, id))
@@ -780,7 +796,8 @@ export class FirestoreAdapter implements StorageAdapter {
         let next: PendingWrite | null = null
         let nextAt = Infinity
         for (const [docKey, write] of this.pending) {
-          if (write.failed || (write.coll === 'orders' && settingsPending)) continue
+          // A document with an unacknowledged SDK write waits for its confirmation (settleDeferred).
+          if (write.failed || this.unconfirmed.has(docKey) || (write.coll === 'orders' && settingsPending)) continue
           const laneFree = this.laneFreeAt.get(docKey) ?? 0
           const at = this.urgent ? laneFree : Math.max(write.changedAt + DEBOUNCE_MS, laneFree)
           if (at < nextAt) { nextAt = at; next = write }

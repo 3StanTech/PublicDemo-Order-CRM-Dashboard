@@ -252,4 +252,44 @@ describe('FirestoreAdapter unsent-write replay', () => {
     await vi.advanceTimersByTimeAsync(2_000)
     expect(orderWrites()).toEqual([{ type: 'set', path }])
   })
+
+  it('sends a deferred replay once its rejected original is removed', async () => {
+    const { items, ...stored } = order
+    const path = `${profilePath}/orders/${orderId}`
+    fake.docs.set(profilePath, { docs: 1 })
+    fake.docs.set(path, { deleted: false, order: stored, items, clientTotalCentavos: 0, updatedAt: Date.now() - 5_000 })
+    localStorage.setItem(mirrorKey, JSON.stringify([{ coll: 'orders', key: orderId, delta: { deleted: false, record: order }, changedAt: Date.now() - 1_000 }]))
+    const adapter = await freshAdapter()
+
+    syncFromServer(new Set([path]))
+    await adapter.ready
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(orderWrites()).toEqual([])
+
+    // The persisted original create is rejected and rolled back.
+    fake.docs.delete(path)
+    fake.listeners.get(`${profilePath}/orders`)?.({
+      metadata: { fromCache: false },
+      docChanges: () => [{ type: 'removed', doc: { id: orderId, data: () => undefined, metadata: { hasPendingWrites: false } } }],
+    })
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(orderWrites()).toEqual([{ type: 'set', path }])
+  })
+
+  it('does not drop a deferred replay on a cache-only confirmation', async () => {
+    const path = `${profilePath}/orders/${orderId}`
+    fake.docs.set(profilePath, { docs: 1 })
+    fake.docs.set(path, { deleted: true, updatedAt: Date.now() - 5_000 })
+    localStorage.setItem(mirrorKey, JSON.stringify([{ coll: 'orders', key: orderId, delta: { deleted: true }, changedAt: Date.now() - 1_000 }]))
+    const adapter = await freshAdapter()
+
+    syncFromServer(new Set([path]))
+    await adapter.ready
+    fake.listeners.get(`${profilePath}/orders`)?.({
+      metadata: { fromCache: true },
+      docChanges: () => [{ type: 'modified', doc: { id: orderId, data: () => fake.docs.get(path), metadata: { hasPendingWrites: false } } }],
+    })
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(orderWrites()).toEqual([{ type: 'set', path }])
+  })
 })

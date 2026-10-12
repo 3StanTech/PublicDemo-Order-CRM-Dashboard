@@ -481,6 +481,8 @@ export class FirestoreAdapter implements StorageAdapter {
     this.orderMeta.clear()
     this.verifications.clear()
     this.knownDocs.clear()
+    // Rebuilt from the fresh listeners' first snapshots.
+    this.unconfirmed.clear()
   }
 
   private async connect(generation: number): Promise<void> {
@@ -574,10 +576,11 @@ export class FirestoreAdapter implements StorageAdapter {
    * same document (one persisted by a previous load): drop it if the server now holds
    * it, otherwise let the drain send it once the write gap has passed.
    */
-  private settleDeferred(docKey: string): void {
+  private settleDeferred(docKey: string, fromCache: boolean): void {
     const write = this.pending.get(docKey)
     if (!write) return
-    if (this.serverHas(write)) {
+    // A cache-only rollback may show stale state: only the server's view can drop a write.
+    if (!fromCache && this.serverHas(write)) {
       this.pending.delete(docKey)
       this.persistPending()
     }
@@ -610,7 +613,8 @@ export class FirestoreAdapter implements StorageAdapter {
       if (change.type === 'removed') {
         this.server[coll].delete(id)
         this.knownDocs.delete(`${coll}/${id}`)
-        this.unconfirmed.delete(`${coll}/${id}`)
+        // A deferred write whose rolled-back original vanished can now be sent.
+        if (this.unconfirmed.delete(`${coll}/${id}`)) this.scheduleDrain(0)
         if (coll === 'orders') this.orderMeta.delete(id)
       } else {
         const data = change.doc.data({ serverTimestamps: 'estimate' })
@@ -630,7 +634,7 @@ export class FirestoreAdapter implements StorageAdapter {
           this.laneFreeAt.set(docKey, Math.max(this.laneFreeAt.get(docKey) ?? 0, serverFree))
         }
         if (delta) (this.server[coll] as Map<string, typeof delta>).set(id, delta)
-        if (confirmedNow) this.settleDeferred(docKey)
+        if (confirmedNow) this.settleDeferred(docKey, snapshot.metadata.fromCache)
         if (coll === 'orders') this.orderMeta.set(id, { updatedAt: millis(data.updatedAt), pendingWrite: change.doc.metadata.hasPendingWrites })
       }
       this.emitDiff(coll, before, this.recordFor(coll, id))

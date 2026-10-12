@@ -328,6 +328,7 @@ export class FirestoreAdapter implements StorageAdapter {
 
   /** Sends queued writes now (page hidden or closing); localStorage still covers a lost flush. */
   private flushNow(): void {
+    if (this.resetting) return
     for (const orderId of [...this.itemDrafts.keys()]) this.flushDraft(orderId)
     if (this.pending.size === 0) return
     this.urgent = true
@@ -403,6 +404,9 @@ export class FirestoreAdapter implements StorageAdapter {
    * are removed by the function when their orders are deleted.
    */
   async clearVisitorData(): Promise<void> {
+    // Let startup replay the previous load's unsent writes first, so they are
+    // dropped below instead of being replayed (and re-sent) after the reset.
+    await this.readyPromise.catch(() => undefined)
     this.resetting = true
     for (const draft of this.itemDrafts.values()) clearTimeout(draft.timer)
     this.itemDrafts.clear()
@@ -426,13 +430,17 @@ export class FirestoreAdapter implements StorageAdapter {
         await batch.commit()
       }
       cleared = true
+      // Anything queued meanwhile targeted the deleted data: nothing is re-sent.
+      this.pending.clear()
       writeStoredPending(uid, [])
     } finally {
+      this.resetting = false
       if (!cleared) {
         for (const [docKey, write] of unsent) if (!this.pending.has(docKey)) this.pending.set(docKey, write)
+        // A reconnect during the reset skipped the replay; catch up now.
+        if (this.status.state === 'ready') this.restorePending()
         this.scheduleDrain(0)
       }
-      this.resetting = false
     }
   }
 
@@ -535,16 +543,27 @@ export class FirestoreAdapter implements StorageAdapter {
 
   /** Replays writes a previous page load queued but did not send (once server state is known). */
   private restorePending(): void {
-    if (this.uid === null) return
+    if (this.uid === null || this.resetting) return
     for (const stored of readStoredPending(this.uid)) {
       const docKey = `${stored.coll}/${stored.key}`
-      if (this.pending.has(docKey)) continue
+      if (this.pending.has(docKey) || this.serverHas(stored)) continue
       const before = this.recordFor(stored.coll, stored.key)
       this.pending.set(docKey, { ...stored, version: ++this.writeVersion, failed: false })
       this.emitDiff(stored.coll, before, this.recordFor(stored.coll, stored.key))
       if (stored.coll === 'orders') this.notifyVerification(stored.key)
     }
     this.persistPending()
+  }
+
+  /** True when the server already holds this write (acknowledged before its mirror entry was removed). */
+  private serverHas(stored: StoredPendingWrite): boolean {
+    const onServer = this.server[stored.coll].get(stored.key)
+    if (!onServer) return false
+    if (onServer.deleted || stored.delta.deleted) return onServer.deleted && stored.delta.deleted
+    const record = stored.coll === 'orders'
+      ? { ...(stored.delta.record as StoredOrder), items: sortItems((stored.delta.record as StoredOrder).items) }
+      : stored.delta.record
+    return stableStringify(record) === stableStringify(onServer.record)
   }
 
   /** Mirrors the unsent queue to localStorage so a reload cannot lose a saved change. */
@@ -578,6 +597,12 @@ export class FirestoreAdapter implements StorageAdapter {
         const data = change.doc.data({ serverTimestamps: 'estimate' })
         const delta = fromDocument(coll, data)
         this.knownDocs.add(`${coll}/${id}`)
+        // The rules' per-document write gap counts from the server's last write.
+        const updatedAt = millis(data.updatedAt)
+        if (updatedAt !== null) {
+          const docKey = `${coll}/${id}`
+          this.laneFreeAt.set(docKey, Math.max(this.laneFreeAt.get(docKey) ?? 0, updatedAt + DOC_WRITE_GAP_MS))
+        }
         if (delta) (this.server[coll] as Map<string, typeof delta>).set(id, delta)
         if (coll === 'orders') this.orderMeta.set(id, { updatedAt: millis(data.updatedAt), pendingWrite: change.doc.metadata.hasPendingWrites })
       }

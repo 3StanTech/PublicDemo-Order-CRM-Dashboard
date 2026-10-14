@@ -7,6 +7,7 @@ import { blankImportDraft, storedOrderToImportDraft } from '../order-editor/orde
 import { OrderCard } from './OrderCard'
 import { canAdvance, canCancel, nextStatus, operationalStatuses, statusLabels } from './orderLifecycle'
 import { useOrdersData } from './useOrdersData'
+import { compareInstants } from './order-timestamps'
 
 function customerFor(customers: StoredCustomer[], order: StoredOrder): StoredCustomer | undefined {
   return customers.find((customer) => customer.id === order.customerId)
@@ -36,7 +37,7 @@ export function OrdersHistory({ adapter: providedAdapter }: OrdersHistoryProps) 
           .filter((value): value is string => Boolean(value))
           .some((value) => value.toLocaleLowerCase().includes(normalizedQuery))
       })
-      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .sort((left, right) => compareInstants(right.createdAt, left.createdAt))
   }, [customers, deliveryDate, orders, query, status])
 
   const update = async (order: StoredOrder, patch: Parameters<StorageAdapter['updateOrder']>[1]) => {

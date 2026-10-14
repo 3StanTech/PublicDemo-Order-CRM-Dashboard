@@ -30,7 +30,7 @@ function mapOfSize(size: number): Record<string, number> {
 
 const orderPayload = () => ({
   deleted: false,
-  order: { id: 'ord-1', customerId: 'cus-1', status: 'new' },
+  order: { id: 'ord-1', customerId: 'cus-1', status: 'new', totalCentavos: 24_000 },
   items: [{ id: 'itm-1', productId: 'prd-1', quantity: 2 }],
   clientTotalCentavos: 24_000,
   updatedAt: serverTimestamp(),
@@ -41,7 +41,7 @@ interface DeltaCase {
   validId: string
   badIds: string[]
   live: () => DocumentData
-  /** Overrides that each make the live document invalid by type or size. */
+  /** Overrides that each make the live document invalid by type, size or inconsistent totals. */
   invalid: Record<string, DocumentData>
   /** A live-document key whose absence must be rejected. */
   required: string
@@ -65,6 +65,8 @@ const cases: DeltaCase[] = [
       'items holding a scalar at the last index': { items: [...Array.from({ length: 19 }, () => ({})), 7] },
       'total not an int': { clientTotalCentavos: 12.5 },
       'total negative': { clientTotalCentavos: -1 },
+      'order total differs from client total': { order: { id: 'ord-1', customerId: 'cus-1', status: 'new', totalCentavos: 99_900 } },
+      'order total missing': { order: { id: 'ord-1', customerId: 'cus-1', status: 'new' } },
     },
     required: 'clientTotalCentavos',
   },

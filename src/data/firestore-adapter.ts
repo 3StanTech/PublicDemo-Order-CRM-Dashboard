@@ -280,6 +280,8 @@ export class FirestoreAdapter implements StorageAdapter {
   private generation = 0
   private unsubscribers: Unsubscribe[] = []
   private synced = new Set<string>()
+  /** True from a (re)connect until every listener's first server snapshot has arrived. */
+  private loading = true
   private connectTimer: ReturnType<typeof setTimeout> | undefined
 
   private readonly server: { [C in DeltaCollection]: Map<string, Delta<DeltaRecord[C]>> } = {
@@ -436,6 +438,8 @@ export class FirestoreAdapter implements StorageAdapter {
       for (const draft of this.itemDrafts.values()) clearTimeout(draft.timer)
       this.itemDrafts.clear()
       writeStoredPending(uid, [])
+      // The rejected writes were discarded with everything else.
+      this.settleWriteError()
     } finally {
       this.resetting = false
       if (!cleared) {
@@ -463,9 +467,10 @@ export class FirestoreAdapter implements StorageAdapter {
     this.teardown()
     const generation = ++this.generation
     if (this.readySettled || !this.readyPromise) this.newReadyPromise()
+    this.loading = true
     this.setStatus({ state: 'connecting' })
     this.connectTimer = setTimeout(() => {
-      if (generation === this.generation && this.status.state === 'connecting') {
+      if (generation === this.generation && this.loading && (this.status.state === 'connecting' || this.hasWriteError())) {
         this.fail('connect', new Error('Your saved changes could not be loaded. Check your connection and try again.'))
       }
     }, CONNECT_TIMEOUT_MS)
@@ -477,11 +482,11 @@ export class FirestoreAdapter implements StorageAdapter {
     for (const unsubscribe of this.unsubscribers) unsubscribe()
     this.unsubscribers = []
     this.synced.clear()
-    for (const coll of DELTA_COLLECTIONS) this.server[coll].clear()
-    this.orderMeta.clear()
-    this.verifications.clear()
+    // The server maps, order metadata and verifications keep showing the previous
+    // state until the fresh listeners' first server snapshots replace it
+    // (dropStale emits the removals). Writes wait for loading, so these two can
+    // be rebuilt from scratch.
     this.knownDocs.clear()
-    // Rebuilt from the fresh listeners' first snapshots.
     this.unconfirmed.clear()
   }
 
@@ -506,11 +511,22 @@ export class FirestoreAdapter implements StorageAdapter {
       for (const coll of DELTA_COLLECTIONS) {
         this.unsubscribers.push(onSnapshot(collection(profile, coll), { includeMetadataChanges: true }, (snapshot) => {
           this.applySnapshot(coll, snapshot)
-          if (!snapshot.metadata.fromCache) this.markSynced(generation, coll)
+          if (snapshot.metadata.fromCache) return
+          if (generation === this.generation && !this.synced.has(coll)) this.dropStale(coll, snapshot)
+          this.markSynced(generation, coll)
         }, onError))
       }
 
+      let firstVerifications = true
       this.unsubscribers.push(onSnapshot(collection(profile, 'verifications'), (snapshot) => {
+        if (firstVerifications && generation === this.generation) {
+          // Verifications kept from before a reconnect that the server no longer holds.
+          firstVerifications = false
+          const live = new Set(snapshot.docs.map((document) => document.id))
+          for (const id of [...this.verifications.keys()]) {
+            if (!live.has(id)) { this.verifications.delete(id); this.notifyVerification(id) }
+          }
+        }
         for (const change of snapshot.docChanges()) {
           const id = change.doc.id
           if (change.type === 'removed') this.verifications.delete(id)
@@ -536,14 +552,48 @@ export class FirestoreAdapter implements StorageAdapter {
     if (generation !== this.generation) return
     this.synced.add(name)
     if (this.synced.size < DELTA_COLLECTIONS.length + 1) return
-    if (this.status.state === 'ready') return
+    // Only finishing a (re)connect makes the adapter ready; later snapshots never
+    // clear an error (a rejected save keeps its banner until it is retried).
+    if (!this.loading) return
+    this.loading = false
     clearTimeout(this.connectTimer)
     this.restorePending()
     if (this.readySettled) this.newReadyPromise()
     this.readySettled = true
     this.resolveReady()
-    this.setStatus({ state: 'ready' })
+    if (!this.hasFailedWrite()) this.setStatus({ state: 'ready' })
     this.scheduleDrain(0)
+  }
+
+  private hasWriteError(): boolean {
+    return this.status.state === 'error' && this.status.kind === 'write'
+  }
+
+  /** True while a rejected write is still queued and waiting for a retry. */
+  private hasFailedWrite(): boolean {
+    return this.hasWriteError() && [...this.pending.values()].some((write) => write.failed)
+  }
+
+  /** Clears a write error once nothing rejected is left (retried successfully or discarded). */
+  private settleWriteError(): void {
+    if (!this.loading && this.hasWriteError() && !this.hasFailedWrite()) this.setStatus({ state: 'ready' })
+  }
+
+  /**
+   * After a reconnect, the first server snapshot of a collection is its whole
+   * contents: records kept from before the reconnect that it lacks were removed
+   * meanwhile. Drop them and emit the change (a removed tombstone restores the seed record).
+   */
+  private dropStale(coll: DeltaCollection, snapshot: QuerySnapshot): void {
+    const live = new Set(snapshot.docs.map((document) => document.id))
+    for (const id of [...this.server[coll].keys()]) {
+      if (live.has(id)) continue
+      const before = this.recordFor(coll, id)
+      this.server[coll].delete(id)
+      if (coll === 'orders') this.orderMeta.delete(id)
+      this.emitDiff(coll, before, this.recordFor(coll, id))
+      if (coll === 'orders') this.notifyVerification(id)
+    }
   }
 
   /** Replays writes a previous page load queued but did not send (once server state is known). */
@@ -792,7 +842,7 @@ export class FirestoreAdapter implements StorageAdapter {
    * order with the visitor's saved settings, so those must land first.
    */
   private async drain(): Promise<void> {
-    if (this.draining || this.uid === null || this.status.state === 'connecting' || this.resetting) return
+    if (this.draining || this.uid === null || this.loading || this.resetting) return
     this.draining = true
     try {
       for (;;) {
@@ -839,6 +889,7 @@ export class FirestoreAdapter implements StorageAdapter {
         this.pending.delete(docKey)
         this.persistPending()
       }
+      this.settleWriteError()
     } catch (error) {
       if (this.pending.get(docKey)?.version === write.version) write.failed = true
       this.fail('write', toError(error, 'A change could not be saved.'))

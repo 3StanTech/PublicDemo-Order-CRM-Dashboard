@@ -1,5 +1,13 @@
 import type { StoredOrder } from '../../data/types'
 
+/**
+ * Orders an ISO timestamp pair by the instant it names. Sample data carries
+ * +08:00 offsets and new records UTC, so plain string comparison misorders them.
+ */
+export function compareInstants(left: string, right: string): number {
+  return Date.parse(left) - Date.parse(right)
+}
+
 const lifecycleTimestampFormatter = new Intl.DateTimeFormat('en-PH', {
   timeZone: 'Asia/Manila',
   month: 'short',

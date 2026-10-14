@@ -7,6 +7,7 @@ import { useOrdersData } from '../orders/useOrdersData'
 import { OrderEditorModal } from '../order-editor/OrderEditorModal'
 import { blankImportDraft, storedOrderToImportDraft } from '../order-editor/orderDraftMapping'
 import { relevantDeliveryDate } from './delivery-dates'
+import { compareInstants } from '../orders/order-timestamps'
 
 function customerFor(customers: StoredCustomer[], order: StoredOrder): StoredCustomer | undefined {
   return customers.find((customer) => customer.id === order.customerId)
@@ -15,7 +16,12 @@ function customerFor(customers: StoredCustomer[], order: StoredOrder): StoredCus
 function routeSort(left: StoredOrder, right: StoredOrder): number {
   const leftPosition = left.routePosition ?? Number.MAX_SAFE_INTEGER
   const rightPosition = right.routePosition ?? Number.MAX_SAFE_INTEGER
-  return leftPosition - rightPosition || left.createdAt.localeCompare(right.createdAt)
+  return leftPosition - rightPosition || compareInstants(left.createdAt, right.createdAt)
+}
+
+/** Board columns list the newest order first; the run list keeps route order. */
+function newestFirst(left: StoredOrder, right: StoredOrder): number {
+  return compareInstants(right.createdAt, left.createdAt)
 }
 
 type TodayBoardProps = { adapter?: StorageAdapter; initialDeliveryDate?: string }
@@ -128,7 +134,7 @@ export function TodayBoard({ adapter: providedAdapter, initialDeliveryDate }: To
       {!loading && !error && view === 'board' && (
         <div className="motion-fade-in mt-5 space-y-5" aria-label="Order status board">
           {operationalStatuses.map((status) => {
-            const statusOrders = selectedOrders.filter((order) => order.status === status)
+            const statusOrders = selectedOrders.filter((order) => order.status === status).sort(newestFirst)
             return (
               <section key={status} aria-labelledby={`status-${status}`} className="min-w-0">
                 <div className="mb-2 flex items-center justify-between gap-3">

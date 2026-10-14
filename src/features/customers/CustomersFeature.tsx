@@ -12,6 +12,7 @@ import { VerificationChip } from '../orders/VerificationChip'
 import { customerProfileKey, loadCustomerProfile, saveCustomerProfile, type CustomerProfile } from './customer-profile'
 import { getCustomerSummaries, type CustomerSummary } from './customer-stats'
 import { deleteCustomerCascade } from './deleteCustomerCascade'
+import { compareInstants } from '../orders/order-timestamps'
 
 type CustomersFeatureProps = { adapter: StorageAdapter }
 
@@ -103,7 +104,7 @@ function CustomerDetail({ adapter, summary, orders, customers }: { adapter: Stor
   const { writesReady } = useSyncGate()
 
   const customerOrders = useMemo(
-    () => orders.filter((order) => order.customerId === summary.customer.id).sort((left, right) => right.createdAt.localeCompare(left.createdAt)),
+    () => orders.filter((order) => order.customerId === summary.customer.id).sort((left, right) => compareInstants(right.createdAt, left.createdAt)),
     [orders, summary.customer.id],
   )
 

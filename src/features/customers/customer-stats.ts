@@ -1,4 +1,5 @@
 import type { StoredCustomer, StoredOrder } from '../../data/types'
+import { compareInstants } from '../orders/order-timestamps'
 
 export type CustomerSummary = {
   customer: StoredCustomer
@@ -17,7 +18,7 @@ export function isNonCancelled(order: StoredOrder): boolean {
 export function compareOrderRecency(left: StoredOrder, right: StoredOrder): number {
   const deliveryComparison = (left.deliveryDate ?? '').localeCompare(right.deliveryDate ?? '')
   if (deliveryComparison !== 0) return deliveryComparison
-  return left.createdAt.localeCompare(right.createdAt)
+  return compareInstants(left.createdAt, right.createdAt)
 }
 
 export function getFavoriteDrink(orders: readonly StoredOrder[]): string | null {

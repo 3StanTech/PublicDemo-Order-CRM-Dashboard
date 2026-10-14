@@ -1,5 +1,6 @@
 import type { StoredCustomer, StoredOrder } from '../../data/types'
 import type { ImportDraft } from './types'
+import { compareInstants } from '../orders/order-timestamps'
 
 export function normalizeCustomerName(name: string): string {
   return name.trim().toLocaleLowerCase('en-PH').replace(/[^\p{L}\p{N}]+/gu, ' ').replace(/\s+/g, ' ')
@@ -19,7 +20,7 @@ export function applyCustomerMatch(draft: ImportDraft, customers: readonly Store
   }
   const customer = matches[0]
   const withoutAmbiguity = draft.unresolvedFields.filter((field) => field !== 'Customer name matches multiple saved customers')
-  const latest = orders.filter((order) => order.customerId === customer.id).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0]
+  const latest = orders.filter((order) => order.customerId === customer.id).sort((a, b) => compareInstants(b.updatedAt, a.updatedAt))[0]
   return {
     ...draft,
     matchedCustomerId: customer.id,

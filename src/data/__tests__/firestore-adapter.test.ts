@@ -11,7 +11,10 @@ type Listener = (snapshot: unknown) => void
 const fake = vi.hoisted(() => ({
   docs: new Map<string, Record<string, unknown>>(),
   listeners: new Map<string, Listener>(),
+  errorListeners: new Map<string, (error: Error) => void>(),
   commits: [] as Op[][],
+  /** Rejects the next commit (a save the server refuses). */
+  failNextCommit: false,
 }))
 
 vi.mock('../firebase', () => ({
@@ -27,8 +30,10 @@ vi.mock('firebase/firestore', () => {
     serverTimestamp: () => ({ serverTimestamp: true }),
     increment: (n: number) => ({ increment: n }),
     onSnapshot: (ref: Ref, ...args: unknown[]) => {
-      fake.listeners.set(ref.path, args.find((arg) => typeof arg === 'function') as Listener)
-      return () => fake.listeners.delete(ref.path)
+      const [next, error] = args.filter((arg) => typeof arg === 'function')
+      fake.listeners.set(ref.path, next as Listener)
+      fake.errorListeners.set(ref.path, error as (error: Error) => void)
+      return () => { fake.listeners.delete(ref.path); fake.errorListeners.delete(ref.path) }
     },
     getDocsFromServer: async (ref: Ref) => ({
       docs: [...fake.docs.keys()]
@@ -42,6 +47,10 @@ vi.mock('firebase/firestore', () => {
         update: (ref: Ref, data: Record<string, unknown>) => { ops.push({ type: 'update', path: ref.path, data }) },
         delete: (ref: Ref) => { ops.push({ type: 'delete', path: ref.path }) },
         commit: async () => {
+          if (fake.failNextCommit) {
+            fake.failNextCommit = false
+            throw new Error('PERMISSION_DENIED')
+          }
           for (const op of ops) {
             if (op.type === 'delete') fake.docs.delete(op.path)
             else fake.docs.set(op.path, { ...fake.docs.get(op.path), ...op.data })
@@ -67,6 +76,7 @@ const order = {
 function snapshot(docs: { id: string; data: Record<string, unknown> }[], pendingPaths: Set<string>, prefix: string) {
   return {
     metadata: { fromCache: false },
+    docs: docs.map(({ id }) => ({ id })),
     docChanges: () => docs.map(({ id, data }) => ({
       type: 'added', doc: { id, data: () => data, metadata: { hasPendingWrites: pendingPaths.has(prefix + id) } },
     })),
@@ -102,7 +112,9 @@ describe('FirestoreAdapter unsent-write replay', () => {
     vi.useFakeTimers()
     fake.docs.clear()
     fake.listeners.clear()
+    fake.errorListeners.clear()
     fake.commits.length = 0
+    fake.failNextCommit = false
     // Recent Node versions shadow jsdom's localStorage with an unconfigured one.
     const items = new Map<string, string>()
     vi.stubGlobal('localStorage', {
@@ -291,5 +303,76 @@ describe('FirestoreAdapter unsent-write replay', () => {
     })
     await vi.advanceTimersByTimeAsync(5_000)
     expect(orderWrites()).toEqual([{ type: 'set', path }])
+  })
+
+  it('keeps the retry banner for a rejected save until the save is retried', async () => {
+    const { items, ...stored } = order
+    const path = `${profilePath}/orders/${orderId}`
+    fake.docs.set(profilePath, { docs: 1 })
+    fake.docs.set(path, { deleted: false, order: stored, items, clientTotalCentavos: 0, updatedAt: Date.now() - 5_000 })
+    const adapter = await freshAdapter()
+    syncFromServer()
+    await adapter.ready
+
+    fake.failNextCommit = true
+    await adapter.updateOrder(orderId, { notes: 'Leave at the gate' })
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(adapter.syncStatus).toMatchObject({ state: 'error', kind: 'write' })
+
+    // An unrelated server snapshot must not hide the failure.
+    fake.listeners.get(`${profilePath}/customers`)?.({
+      metadata: { fromCache: false },
+      docs: [],
+      docChanges: () => [],
+    })
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(adapter.syncStatus).toMatchObject({ state: 'error', kind: 'write' })
+    expect(orderWrites()).toEqual([])
+
+    adapter.retrySync()
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(orderWrites()).toEqual([{ type: 'set', path }])
+    expect(adapter.syncStatus).toEqual({ state: 'ready' })
+  })
+
+  it('emits removals and restored sample records when a reconnect finds them gone', async () => {
+    const { demoCustomers } = await import('../../demo/seed')
+    const sample = demoCustomers[0]
+    const added = { ...sample, id: 'c-added', name: 'Added visitor customer' }
+    fake.docs.set(profilePath, { docs: 2 })
+    fake.docs.set(`${profilePath}/customers/c-added`, { deleted: false, customer: added, updatedAt: Date.now() - 5_000 })
+    fake.docs.set(`${profilePath}/customers/${sample.id}`, { deleted: true, updatedAt: Date.now() - 5_000 })
+    const adapter = await freshAdapter()
+    syncFromServer()
+    await adapter.ready
+    expect((await adapter.listCustomers()).map((customer) => customer.id)).toContain('c-added')
+    expect((await adapter.listCustomers()).map((customer) => customer.id)).not.toContain(sample.id)
+
+    const changes: { operation: string; id: string }[] = []
+    adapter.subscribe((change) => changes.push({ operation: change.operation, id: (change.entity as { id: string }).id }))
+
+    // Listening fails; meanwhile both documents are deleted (e.g. a reset in another tab).
+    fake.errorListeners.get(`${profilePath}/customers`)?.(new Error('unavailable'))
+    expect(adapter.syncStatus).toMatchObject({ state: 'error', kind: 'listen' })
+    fake.docs.delete(`${profilePath}/customers/c-added`)
+    fake.docs.delete(`${profilePath}/customers/${sample.id}`)
+
+    adapter.retrySync()
+    await vi.advanceTimersByTimeAsync(0)
+    // The previous state stays visible until the replacement snapshots load.
+    expect((await adapter.listCustomers()).map((customer) => customer.id)).toContain('c-added')
+    expect(changes).toEqual([])
+
+    syncFromServer()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(adapter.syncStatus).toEqual({ state: 'ready' })
+    const ids = (await adapter.listCustomers()).map((customer) => customer.id)
+    expect(ids).not.toContain('c-added')
+    expect(ids).toContain(sample.id)
+    expect(changes).toEqual(expect.arrayContaining([
+      { operation: 'delete', id: 'c-added' },
+      { operation: 'insert', id: sample.id },
+    ]))
+    expect(changes).toHaveLength(2)
   })
 })

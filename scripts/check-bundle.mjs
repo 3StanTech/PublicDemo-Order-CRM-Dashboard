@@ -2,8 +2,10 @@
 /**
  * Post-build bundle budget check.
  *
- * Measures gzipped transfer size of the initial `/today` route (entry + static
- * graph + framework + today route chunk). Other lazy route chunks are excluded.
+ * Measures gzipped transfer size of the initial `/today` route: entry + static
+ * graph + framework + today route chunk + the startup chunks loaded right after
+ * unlock (the Firestore adapter chunk that src/data/adapter.ts imports
+ * dynamically, and its static graph). Other lazy route chunks are excluded.
  *
  * Budget is KiB of gzipped JS. Fail with non-zero exit if exceeded.
  */
@@ -17,8 +19,11 @@ const root = join(__dirname, '..')
 const distDir = join(root, 'dist')
 const assetsDir = join(distDir, 'assets')
 
-/** @type {number} Budget in KiB (gzipped initial-route transfer). */
-const BUDGET_KIB = 220
+/**
+ * @type {number} Budget in KiB (gzipped initial-route transfer, startup chunks
+ * included). Measured 286.69 KiB on 2026-10-14; the budget adds small headroom.
+ */
+const BUDGET_KIB = 300
 
 const KiB = 1024
 
@@ -54,7 +59,7 @@ function listJsAssets() {
 /** Static ESM import/export-from specifiers only (not dynamic import()). */
 function staticImportSpecifiers(source) {
   // Vite/rolldown minify to: import{x as y}from"./chunk.js" (no spaces)
-  const stripped = source.replace(/\bimport\s*\(\s*["'][^"']+["']\s*\)/g, '/*dynamic*/')
+  const stripped = source.replace(/\bimport\s*\(\s*["'`][^"'`]+["'`]\s*\)/g, '/*dynamic*/')
   const specs = new Set()
   let m
   // import ... from "..."  /  export ... from "..."
@@ -72,7 +77,7 @@ function staticImportSpecifiers(source) {
 
 function dynamicImportSpecifiers(source) {
   const specs = []
-  const re = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g
+  const re = /\bimport\s*\(\s*["'`]([^"'`]+)["'`]\s*\)/g
   let m
   while ((m = re.exec(source)) !== null) {
     specs.push(m[1])
@@ -123,6 +128,11 @@ function isTodayRouteChunk(name) {
   return /TodayPage-/.test(name)
 }
 
+/** Dynamic chunks the app loads at startup, right after unlock (not route-lazy). */
+function isStartupChunk(name) {
+  return /^firestore-adapter-/.test(name)
+}
+
 function walkStaticGraph(startNames, byName, { excludeOtherRoutes = true } = {}) {
   const out = new Set()
   const queue = [...startNames]
@@ -165,18 +175,18 @@ function collectInitialGraph(assets) {
     }
   }
 
-  // /today route chunk via name or dynamic import from the initial set
-  const todayNames = assets.filter((a) => isTodayRouteChunk(a.name)).map((a) => a.name)
+  // /today route chunk and startup chunks via name or dynamic import from the initial set
+  const dynamicNames = assets.filter((a) => isTodayRouteChunk(a.name) || isStartupChunk(a.name)).map((a) => a.name)
   for (const name of [...initial]) {
     const asset = byName.get(name)
     if (!asset) continue
     for (const spec of dynamicImportSpecifiers(asset.content)) {
       const resolved = resolveAssetName(spec, byName)
-      if (resolved && isTodayRouteChunk(resolved)) todayNames.push(resolved)
+      if (resolved && (isTodayRouteChunk(resolved) || isStartupChunk(resolved))) dynamicNames.push(resolved)
     }
   }
 
-  for (const n of walkStaticGraph([...new Set(todayNames)], byName)) {
+  for (const n of walkStaticGraph([...new Set(dynamicNames)], byName)) {
     initial.add(n)
   }
 
@@ -226,7 +236,7 @@ function main() {
   console.log('-'.repeat(90))
   console.log(`Entry scripts (from index.html): ${entryNames.join(', ') || '(none)'}`)
   console.log(
-    `Initial /today transfer: ${formatBytes(initialRaw)} raw, ${formatBytes(initialGzip)} gzipped ` +
+    `Initial /today transfer incl. startup Firestore adapter chunk: ${formatBytes(initialRaw)} raw, ${formatBytes(initialGzip)} gzipped ` +
       `(${[...initial].sort().join(', ')})`,
   )
 
@@ -235,14 +245,14 @@ function main() {
 
   if (initialGzip > budgetBytes) {
     console.error(
-      `\nFAIL: initial-route gzipped transfer ${formatBytes(initialGzip)} exceeds budget ${BUDGET_KIB} KiB ` +
+      `\nFAIL: initial-route gzipped transfer (incl. startup Firestore adapter chunk) ${formatBytes(initialGzip)} exceeds budget ${BUDGET_KIB} KiB ` +
         `(${formatBytes(budgetBytes)})`,
     )
     process.exit(1)
   }
 
   console.log(
-    `\nOK: initial-route gzipped transfer ${formatBytes(initialGzip)} within ${BUDGET_KIB} KiB budget`,
+    `\nOK: initial-route gzipped transfer (incl. startup Firestore adapter chunk) ${formatBytes(initialGzip)} within ${BUDGET_KIB} KiB budget`,
   )
   process.exit(0)
 }

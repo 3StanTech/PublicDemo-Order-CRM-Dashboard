@@ -149,7 +149,11 @@ export const verifyOrderTotal = onDocumentWritten(
       const order = isRecord(data.order) ? data.order : {}
       const serverTotalCentavos = serverTotal(order, data.items, settings)
       const clientTotalCentavos = centavosOrNull(data.clientTotalCentavos)
-      const match = serverTotalCentavos !== null && serverTotalCentavos === clientTotalCentavos
+      // The app displays order.totalCentavos, so it must agree too.
+      const match =
+        serverTotalCentavos !== null &&
+        serverTotalCentavos === clientTotalCentavos &&
+        serverTotalCentavos === centavosOrNull(order.totalCentavos)
 
       const previous = existing.data()
       const unchanged =

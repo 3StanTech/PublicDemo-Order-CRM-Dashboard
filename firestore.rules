@@ -75,7 +75,9 @@ service cloud.firestore {
           && data.deleted == false
           && data.order is map && data.order.size() <= 40
           && data.items is list && data.items.size() <= 20 && itemMaps(data.items)
-          && data.clientTotalCentavos is int && data.clientTotalCentavos >= 0);
+          && data.clientTotalCentavos is int && data.clientTotalCentavos >= 0
+          // The card shows order.totalCentavos; the function verifies clientTotalCentavos.
+          && data.order.get('totalCentavos', null) == data.clientTotalCentavos);
     }
 
     function customerDoc() {
